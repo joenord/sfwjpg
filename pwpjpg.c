@@ -7,17 +7,17 @@
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
  * of the License, or (at your option) any later version.
- *
+ * 
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- *
+ * 
  * The GNU General Public License is available at
  *
  *    http://www.fsf.org/copyleft/gpl.html
  *
- * Alternatively, you can write to the
+ * Alternatively, you can write to the 
  *
  *    Free Software Foundation, Inc.
  *    59 Temple Place - Suite 330
@@ -25,7 +25,7 @@
  *
  *
  * Revision History:
- *
+ *    
  *     22 Sep 1997  EAL Completed first version.
  *      9 Jan 1999  EAL Added sanity checks to cope with case change
  *                      of filenames embedded in .pwp files.
@@ -197,7 +197,7 @@ if (nameptr-pwpptr > MAXFILENAME)
 
 while ( (nameptr = forward_scan(pwpptr, fileend, dotsfw, 4)) != NULL )
    {
-   for (i=0; i<(nameptr-pwpptr); i++)
+   for (i=0; i<(nameptr-pwpptr); i++) 
       outfilename[i] = pwpptr[i];
    outfilename[i] = '.';
    outfilename[i+1] = 'j';
@@ -215,9 +215,9 @@ while ( (nameptr = forward_scan(pwpptr, fileend, dotsfw, 4)) != NULL )
 
    /*** get .sfw file size from little-endian marker at pwpptr-12 ***/
 
-   b1 = (long) *(pwpptr-10);
-   b2 = (long) *(pwpptr-11);
-   b3 = (long) *(pwpptr-12);
+   b1 = (long) *(pwpptr-10); 
+   b2 = (long) *(pwpptr-11); 
+   b3 = (long) *(pwpptr-12); 
    sfwsize = 65536*b1 + 256*b2 + b3;
 
    retval = sfw_to_jfif(pwpptr, pwpptr+sfwsize-1, outfilename);
@@ -287,7 +287,7 @@ headerstart[12] = 0x00;
 /*** set bufpos to start of next marker ***/
 
 bufpos = headerstart + 2;
-bufpos += read_skip_length(bufpos);
+bufpos += read_skip_length(bufpos); 
 
 /*** fix remaining markers ***/
 
@@ -318,7 +318,7 @@ dataend ++;
 
 /*** open output file ***/
 
-if (filename[0] == '\0')
+if (filename[0] == '\0') 
    outfile = stdout;
 else
    outfile = fopen(filename,"wb");

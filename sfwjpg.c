@@ -1,3 +1,6 @@
+// UNIX Source downloaded from http://www.lipman.org/software/sfw/
+// Ported to Windows 32 bit command line execution by Joe Nord Aug 2002.
+
 /*
  * sfwjpg.c
  *
@@ -88,13 +91,13 @@ long read_skip_length(USCH *marker);
 int main(int argc, char **argv)
 {
    struct stat filestat;
-           int retval;
-        size_t sretval, namelen;
-          char mesg[256];
-          char infilename[256];
-          char outfilename[256];
-          USCH *filebuf;
-          FILE *infile;
+   int retval;
+   size_t sretval, namelen;
+   char mesg[256];
+   char infilename[256];
+   char outfilename[256];
+   USCH *filebuf;
+   FILE *infile;
 
 if ((argc == 1) || (argc > 3))
    {
@@ -113,7 +116,8 @@ if ((argc == 1) || (argc > 3))
 
 strncpy(infilename,argv[1],255);
 namelen = strlen(infilename);
-if ( strcasecmp(infilename+(namelen-4), ".sfw") != 0 )
+//if ( strcasecmp(infilename+(namelen-4), ".sfw") != 0 )
+if ( _stricmp(infilename+(namelen-4), ".sfw") != 0 )
    {
    strcat(infilename, ".sfw");
    namelen += 4;
@@ -121,8 +125,9 @@ if ( strcasecmp(infilename+(namelen-4), ".sfw") != 0 )
 
 if (argc == 3)
    {
-   if (strcasecmp(argv[2],"-") == 0)
-      outfilename[0] = '\0';
+   //if (strcasecmp(argv[2],"-") == 0)
+   if (_stricmp(argv[2],"-") == 0)
+       outfilename[0] = '\0';
    else
       strncpy(outfilename,argv[2],255);
    }
@@ -134,24 +139,24 @@ else
 
 /*** read in .sfw file ***********************************************/
 
-retval = stat(infilename,&filestat);
-if (retval == -1)
-   {
-   sprintf(mesg,"Error getting status for file '%s'",infilename);
-   fprintf(stderr,"\n");
-   perror(mesg);
-   fprintf(stderr,"\n");
-   exit(1);
-   }
+   retval = _stat(infilename,(struct _stat *)&filestat);
+   if (retval == -1)
+      {
+      sprintf(mesg,"Error getting status for file '%s'",infilename);
+      fprintf(stderr,"\n");
+      perror(mesg);
+      fprintf(stderr,"\n");
+      exit(1);
+      }
 
-filebuf = (USCH *) malloc( (size_t) filestat.st_size);
-if (filebuf == NULL)
-   {
-   fprintf(stderr,"\n");
-   perror("Error allocating memory for filebuf");
-   fprintf(stderr,"\n");
-   exit(1);
-   }
+   filebuf = (USCH *) malloc( (size_t) filestat.st_size);
+   if (filebuf == NULL)
+      {
+      fprintf(stderr,"\n");
+      perror("Error allocating memory for filebuf");
+      fprintf(stderr,"\n");
+      exit(1);
+      }
 
 infile = fopen(infilename,"rb");
 if (infile == NULL)
