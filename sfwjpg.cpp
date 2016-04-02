@@ -1,6 +1,9 @@
 // UNIX Source downloaded from http://www.lipman.org/software/sfw/
-// Ported to Windows 32 bit command line execution by Joe Nord Aug 2002.
-// Added wildcard support Joe Nord Oct 2011.
+// 2002-Aug Joe Nord     Ported to Windows 32 bit command line execution
+// 2011-Oct Joe Nord     Added wildcard support for Windows command line
+// 2016-Jan Joe Nord     Correct left-right mirroring and rotate image 180 degrees
+// 2016-Apr Joe Nord     Implement support for 93A format.  Reference:
+//                       http://jonesrh.info/sfw/sfw_sfw93a_details.html
 
 /*
  * sfwjpg.c
@@ -51,6 +54,9 @@
 #include <errno.h>
 
 #include <windows.h>    // Directory enumeration - wildcard support
+#include <gdiplus.h>	// Image rotate and unmirror
+#pragma comment( lib, "gdiplus.lib" )
+using namespace Gdiplus;
 
 #define USCH unsigned char
 #define HUFFSIZE 420
@@ -89,10 +95,31 @@ USCH hufftbl[] = {
 
 USCH markertbl[256];
 
+int formatyear = 0; // 93 = format 93A, 94 = format 94A
+
 int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename);
 USCH *forward_scan(USCH *start, USCH *stop, USCH *goal, int length);
 int fix_marker(USCH *marker);
+int fix_mirroring(char *filename);
 long read_skip_length(USCH *marker);
+
+int getyear(USCH *filebuf, size_t len)
+{
+    int ret = 0;
+    char ch;
+
+    if (len > 5 &&
+        strncmp((char *)filebuf, "SFW9", 4) == 0)
+    {
+        ch = filebuf[4];
+        if (ch >= '0' && ch <= '9')
+        {
+            ret = 90 + ch - '0';
+        }
+    }
+
+    return ret;
+}
 
 int ReadSfwConvertToJpg (char *infilename)
 {
@@ -103,19 +130,34 @@ int ReadSfwConvertToJpg (char *infilename)
     char outfilename[256];
     USCH *filebuf;
     FILE *infile;
+    char *pdot = NULL;
 
 /*** make input and output filenames *********************************/
 
     namelen = strlen(infilename);
-//if ( strcasecmp(infilename+(namelen-4), ".sfw") != 0 )
-    if ( _stricmp(infilename+(namelen-4), ".sfw") != 0 )
+    strcpy(outfilename, infilename);
+
+    pdot = strrchr(outfilename, '.');
+    if (!pdot)
     {
-        strcat(infilename, ".sfw");
-        namelen += 4;
+        // no file extension
+        pdot = outfilename + namelen;
     }
 
-    strcpy(outfilename,infilename);
-    strcpy(outfilename+(namelen-4),".jpg");
+    if (_stricmp(pdot, ".sfw") == 0)
+    {
+        // 94A files have sfw extention on input
+        // Output file same name as input file, with jpg extension
+        strcpy(pdot, ".jpg");
+    }
+    else
+    {
+        // Probably 93A format where input filenames have this format
+        //    rollnumber.#nn    where nn are the frame number
+        // Since rollnumber is same for all shots, keep the #nn and 
+        // append jpg extension
+        strcat (outfilename, ".jpg");
+    }
 
 /*** read in .sfw file ***********************************************/
 
@@ -159,12 +201,26 @@ int ReadSfwConvertToJpg (char *infilename)
     }
     fclose(infile);
 
+    formatyear = getyear(filebuf, filestat.st_size);
+
     retval = sfw_to_jfif(filebuf, filebuf+filestat.st_size-1, outfilename);
 
     if (retval != 0)
     {
         fprintf(stderr, "Conversion to %s failed.\n\n",outfilename);
         return(1);
+    }
+
+	// 20-Jan-2016 Unmirror the output and rotate 180 degrees
+    // The images were not upside down in the original SFW format
+    if (formatyear != 93)
+    {
+	    retval = fix_mirroring(outfilename);
+	    if (retval != 0)
+	    {
+		    fprintf(stderr, "Un-mirror failed %s failed.\n\n", outfilename);
+		    return(1);
+	    }
     }
 
     free( (void *) filebuf );
@@ -281,12 +337,24 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 
 /*** Scan for start of JFIF data ***/
 
-    scanbuf[0] = 0xff;
-    scanbuf[1] = 0xc8;
-    scanbuf[2] = 0xff;
-    scanbuf[3] = 0xd0;
+    if (formatyear == 93)
+    {
+        scanbuf[0] = 0xff;  // normally found at offset 1B
+        scanbuf[1] = 0xd8;
+        scanbuf[2] = 0xff;
+        scanbuf[3] = 0xe0;
+    }
+    else
+    {
+        scanbuf[0] = 0xff;
+        scanbuf[1] = 0xc8;
+        scanbuf[2] = 0xff;
+        scanbuf[3] = 0xd0;
+    }
     headerstart = forward_scan(sfwstart, sfwend, scanbuf, 4);
-    if (headerstart == NULL) return(-1);
+
+    if (headerstart == NULL) 
+        return(-1);
 
 /*** fix SOI and APP0 tags ***/
 
@@ -316,8 +384,10 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
     while (!dataflag)
     {
         retval = fix_marker(bufpos);
-        if (retval == -1) return(-1);
-        if (retval == (int)0xc4) huffmanflag = 1;
+        if (retval == -1) 
+            return(-1);
+        if (retval == (int)0xc4) 
+            huffmanflag = 1;
         if (bufpos[1] == 0xda)
             dataflag = 1;
         else
@@ -328,9 +398,13 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 /*** scan forward for EOI marker ***/
 
     scanbuf[0] = 0xff;
-    scanbuf[1] = 0xc9;
+    if (formatyear == 93)
+        scanbuf[1] = 0xd9;
+    else
+        scanbuf[1] = 0xc9;
     dataend = forward_scan(bufpos, sfwend, scanbuf, 2);
-    if (dataend == NULL) return(-1);
+    if (dataend == NULL) 
+        return(-1);
 
 /*** fix EOI marker ***/
 
@@ -382,7 +456,7 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
         }
     }
 
-/*** write rest of jfif file ***/
+    /*** write rest of jfif file ***/
 
     sretval = fwrite(headerend+1, dataend-headerend, 1, outfile);
     if (sretval == 0)
@@ -395,7 +469,8 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
     }
 
     fclose(outfile);
-    return(0);
+
+	return(0);
 }
 /***********************************************************************/
 
@@ -436,16 +511,98 @@ int fix_marker(USCH *marker)
                 , marker[0], marker[1]);
         return(-1);
     }
-    if (markertbl[marker[1]] == 0)
+
+    // 93A format does not mangle the formats
+    // unmangle is only required on 94A
+    if (formatyear == 94)
     {
-        fprintf(stderr, "\nWARNING: Unknown marker 0x%02x changed to comment.\n\n",
+        if (markertbl[marker[1]] == 0)
+        {
+            fprintf(stderr, "\nWARNING: Unknown marker 0x%02x changed to comment.\n\n",
                 marker[1]);
-        marker[1] = 0xfe;   /* 0xfe is the comment marker */
+            marker[1] = 0xfe;   /* 0xfe is the comment marker */
+        }
+        else
+            marker[1] = markertbl[marker[1]];
     }
-    else
-        marker[1] = markertbl[marker[1]];
     return((int)marker[1]);
 }
+/***********************************************************************/
+
+// Function straight from MSDN example
+// https://msdn.microsoft.com/en-us/library/windows/desktop/ms533843%28v=vs.85%29.aspx
+int GetEncoderClsid(const WCHAR* format, CLSID* pClsid)
+{
+	UINT  num = 0;          // number of image encoders
+	UINT  size = 0;         // size of the image encoder array in bytes
+
+	ImageCodecInfo* pImageCodecInfo = NULL;
+
+	GetImageEncodersSize(&num, &size);
+	if (size == 0)
+		return -1;  // Failure
+
+	pImageCodecInfo = (ImageCodecInfo*)(malloc(size));
+	if (pImageCodecInfo == NULL)
+		return -1;  // Failure
+
+	GetImageEncoders(num, size, pImageCodecInfo);
+
+	for (UINT j = 0; j < num; ++j)
+	{
+		if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0)
+		{
+			*pClsid = pImageCodecInfo[j].Clsid;
+			free(pImageCodecInfo);
+			return j;  // Success
+		}
+	}
+
+	free(pImageCodecInfo);
+	return -1;  // Failure
+}
+
+/***********************************************************************/
+// Rotate image 180 degrees and unmirror left and right
+// Implementation utilizes Windows APIs
+int fix_mirroring(char *filename)
+{
+	int len = 0;
+	LPWSTR filenamew = NULL;
+
+	// convert to WIDE char required for image functions
+	len = strlen(filename);
+	filenamew = new WCHAR[len + 1];
+	for (int i = 0; i < len; i++)
+	{
+		filenamew[i] = filename[i];
+	}
+	filenamew[len] = '\0';
+
+	Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+	ULONG_PTR gdiplusToken;
+	Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
+
+	// Load the image 
+	Gdiplus::Image* image = Gdiplus::Image::FromFile(filenamew);
+
+	// Rotate image 180 degrees and fix X axis mirroring
+	image->RotateFlip(Rotate180FlipX);
+
+	// Save the image back into the same file it came from
+	CLSID jpgClsid;
+	GetEncoderClsid(L"image/jpeg", &jpgClsid);
+	image->Save(filenamew, &jpgClsid);
+
+	delete image; 
+	image = NULL;
+	Gdiplus::GdiplusShutdown(gdiplusToken);
+	delete[] filenamew;
+
+    return (0);
+}
+
+
 /***********************************************************************/
 
 long read_skip_length(USCH *marker)
