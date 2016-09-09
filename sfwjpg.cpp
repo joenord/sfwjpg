@@ -4,6 +4,7 @@
 // 2016-Jan Joe Nord     Correct left-right mirroring and rotate image 180 degrees
 // 2016-Apr Joe Nord     Implement support for 93A format.  Reference:
 //                       http://jonesrh.info/sfw/sfw_sfw93a_details.html
+// 2016-Sep Joe Nord     Implement support for Overlake Photo Express .PIC files
 
 /*
  * sfwjpg.c
@@ -58,12 +59,23 @@
 #pragma comment( lib, "gdiplus.lib" )
 using namespace Gdiplus;
 
+#define NUM_ELEMENTS(array) ( sizeof(array) / sizeof((array)[0]) )
+
+typedef enum
+{
+    SIF_UNKNOWN,
+    SIF_93A,         // Seattle Filmworks original format
+    SIF_94A,         // Seattle Filmworks tag obfuscated format
+    SIF_PIC          // Overlake Photo Express PIC
+} SOURCEIMAGEFORMAT;
+
+SOURCEIMAGEFORMAT sourceimageformat = SIF_UNKNOWN;
+
 #define USCH unsigned char
+
 #define HUFFSIZE 420
 
-/*** 420 characters ***/
-
-USCH hufftbl[] = {
+USCH hufftbl[HUFFSIZE] = {
     0xFF,0xC4,0x01,0xA2,0x00,0x00,0x01,0x05,0x01,0x01,0x01,0x01,0x01,0x01,0x00,0x00,
     0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,
     0x0B,0x01,0x00,0x03,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x00,0x00,0x00,
@@ -95,7 +107,23 @@ USCH hufftbl[] = {
 
 USCH markertbl[256];
 
-int formatyear = 0; // 93 = format 93A, 94 = format 94A
+
+// Overlake Photo Express .PIC files when converted to JPG need a DQT table added (FF DB)
+
+USCH overlakephotoDQTtable[0x86] = 
+{
+    0xFF,0xDB,  // DQT marker
+    0x00, 0x84, // Size less 2
+    0x00, 0x07, 0x04, 0x05, 0x06, 0x05, 0x04, 0x07, 0x06, 0x05, 0x06, 0x07, 0x07, 0x07, 0x08, 0x0A,
+    0x11, 0x0B, 0x0A, 0x09, 0x09, 0x0A, 0x15, 0x0F, 0x10, 0x0C, 0x11, 0x19, 0x16, 0x1A, 0x1A, 0x18,
+    0x16, 0x18, 0x18, 0x1C, 0x1F, 0x28, 0x22, 0x1C, 0x1D, 0x26, 0x1E, 0x18, 0x18, 0x23, 0x2F, 0x23,
+    0x26, 0x29, 0x2A, 0x2D, 0x2D, 0x2D, 0x1B, 0x21, 0x31, 0x34, 0x31, 0x2B, 0x34, 0x28, 0x2C, 0x2D,
+    0x2B, 0x01, 0x07, 0x07, 0x07, 0x0A, 0x09, 0x0A, 0x14, 0x0B, 0x0B, 0x14, 0x2B, 0x1C, 0x18, 0x1C,
+    0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B,
+    0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B,
+    0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B, 0x2B,
+    0x2B, 0x2B
+};
 
 int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename);
 USCH *forward_scan(USCH *start, USCH *stop, USCH *goal, int length);
@@ -103,18 +131,26 @@ int fix_marker(USCH *marker);
 int fix_mirroring(char *filename);
 long read_skip_length(USCH *marker);
 
-int getyear(USCH *filebuf, size_t len)
+SOURCEIMAGEFORMAT getformat(USCH *filebuf, size_t len)
 {
-    int ret = 0;
-    char ch;
+    SOURCEIMAGEFORMAT ret = SIF_UNKNOWN;
+    char *pbuff = (char *)filebuf;
 
-    if (len > 5 &&
-        strncmp((char *)filebuf, "SFW9", 4) == 0)
+    if (len > 5)
     {
-        ch = filebuf[4];
-        if (ch >= '0' && ch <= '9')
+        if (strncmp(pbuff, "SFW93", 5) == 0)
         {
-            ret = 90 + ch - '0';
+            ret = SIF_93A;
+        }
+        else if (strncmp(pbuff, "SFW94", 5) == 0)
+        {
+            ret = SIF_94A;
+        }
+        else if (strncmp(pbuff, "BM", 2) == 0)
+        {
+            // First 16 bytes of all sample Overlake Photo Files are same
+            // 424D0000 00000000 - 00005204 00004400  *BM........R...D.*
+            ret = SIF_PIC;
         }
     }
 
@@ -144,22 +180,22 @@ int ReadSfwConvertToJpg (char *infilename)
         pdot = outfilename + namelen;
     }
 
-    if (_stricmp(pdot, ".sfw") == 0)
+    if (_stricmp(pdot, ".sfw") == 0 ||  // 94A files have sfw extention on input
+        _stricmp(pdot, ".pic") == 0)    // Overlake Photo Express
     {
-        // 94A files have sfw extention on input
         // Output file same name as input file, with jpg extension
         strcpy(pdot, ".jpg");
     }
     else
     {
         // Probably 93A format where input filenames have this format
-        //    rollnumber.#nn    where nn are the frame number
-        // Since rollnumber is same for all shots, keep the #nn and 
-        // append jpg extension
+        //    rollnumber.#nn    where nn is the frame number
+        // Since rollnumber is same for all shots, and only extension changes, 
+        // keep the #nn and append jpg extension
         strcat (outfilename, ".jpg");
     }
 
-/*** read in .sfw file ***********************************************/
+/*** read entire source file ***********************************************/
 
     retval = _stat(infilename,(struct _stat *)&filestat);
     if (retval == -1)
@@ -201,9 +237,12 @@ int ReadSfwConvertToJpg (char *infilename)
     }
     fclose(infile);
 
-    formatyear = getyear(filebuf, filestat.st_size);
+    sourceimageformat = getformat(filebuf, filestat.st_size);
 
     retval = sfw_to_jfif(filebuf, filebuf+filestat.st_size-1, outfilename);
+
+    free((void *)filebuf);
+    filebuf = NULL;
 
     if (retval != 0)
     {
@@ -211,9 +250,8 @@ int ReadSfwConvertToJpg (char *infilename)
         return(1);
     }
 
-	// 20-Jan-2016 Unmirror the output and rotate 180 degrees
-    // The images were not upside down in the original SFW format
-    if (formatyear != 93)
+	// 20-Jan-2016 For SFW94A unmirror the output and rotate 180 degrees
+    if (sourceimageformat == SIF_94A)
     {
 	    retval = fix_mirroring(outfilename);
 	    if (retval != 0)
@@ -222,8 +260,6 @@ int ReadSfwConvertToJpg (char *infilename)
 		    return(1);
 	    }
     }
-
-    free( (void *) filebuf );
 
     return(retval);
 }
@@ -312,21 +348,41 @@ int main(int argc, char *argv[])
 }
 
 /***********************************************************************/
+// JFIF Tags (FF nn)
+// http://dev.exiv2.org/projects/exiv2/wiki/The_Metadata_in_JPEG_files
+//
+// Hex          TagName Comments
+// FFD8 FFE0            Start of JFIF file (4 bytes)
+// FFFE                 Comment
+// FFDA
+// FFA0         SOF0
+// FFA4         DHT 
+// FFC4                 Huffman table
+// FFC8         SOI
+// FFC9         EOI  
+// FFCA         SOS  
+// FFCB         DQT  
+// FFD0         APP0 
+// FFDA                 Data
+// 
+// 
 /***********************************************************************/
 
 int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 {
-    int i, retval, dataflag = 0, huffmanflag = 0;
+    int  retval, dataflag = 0, huffmanflag = 0;
     size_t sretval;
     char mesg[256];
     USCH scanbuf[256];
     USCH *bufpos, *headerstart, *headerend, *dataend;
     FILE *outfile;
 
-/*** Initialize lookup table for marker conversions ***/
+/*** Initialize lookup table for SFW 94A marker conversions
+ *** Just to make stuff hard to understand, the 94A SFW files change the tags
+ *** away from the JPEG normal.  Table is used to convert them back. 
+ ***/
 
-    for (i=0;i<256;i++) markertbl[i] = 0x00;
-
+    memset(markertbl, '\0', sizeof(markertbl));
     markertbl[0xa0] = 0xc0;   /* SOF0 */
     markertbl[0xa4] = 0xc4;   /* DHT  */
     markertbl[0xc8] = 0xd8;   /* SOI  */
@@ -337,14 +393,12 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 
 /*** Scan for start of JFIF data ***/
 
-    if (formatyear == 93)
-    {
-        scanbuf[0] = 0xff;  // normally found at offset 1B
-        scanbuf[1] = 0xd8;
-        scanbuf[2] = 0xff;
-        scanbuf[3] = 0xe0;
-    }
-    else
+    scanbuf[0] = 0xff;  // normally found at offset 1B for SFW 94A
+    scanbuf[1] = 0xd8;
+    scanbuf[2] = 0xff;
+    scanbuf[3] = 0xe0;
+
+    if (sourceimageformat == SIF_94A)
     {
         scanbuf[0] = 0xff;
         scanbuf[1] = 0xc8;
@@ -366,13 +420,28 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 /*** fix identifier and version number           ***/
 /*** place string "JFIF\0\001\0" in proper place ***/
 
-    headerstart[6]  = 0x4a;
-    headerstart[7]  = 0x46;
-    headerstart[8]  = 0x49;
-    headerstart[9]  = 0x46;
-    headerstart[10] = 0x00;
-    headerstart[11] = 0x01;
-    headerstart[12] = 0x00;
+    // .PIC format reads as
+    USCH b6, b7, b8, b9, ba, bb, bc;
+    b6 = headerstart[6];   // 'J'
+    b7 = headerstart[7];   // 'F'
+    b8 = headerstart[8];   // 'I'
+    b9 = headerstart[9];   // 'F' JIFF = Identifier
+    ba = headerstart[10];  // 00  Format revision byte 1
+    bb = headerstart[11];  // 01  Format revision byte 2
+    bc = headerstart[12];  // 02  Units for resolution (note different than set 00 below)
+                           //     00 = none, 01 dots per inch, 02 dots per centimeter
+
+    // Force identifier and version number for SFW files
+    if (sourceimageformat == SIF_93A || sourceimageformat == SIF_94A)
+    {
+        headerstart[6] = 0x4a;
+        headerstart[7] = 0x46;
+        headerstart[8] = 0x49;
+        headerstart[9] = 0x46;
+        headerstart[10] = 0x00;
+        headerstart[11] = 0x01;
+        headerstart[12] = 0x00;
+    }
 
 /*** set bufpos to start of next marker ***/
 
@@ -398,10 +467,12 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 /*** scan forward for EOI marker ***/
 
     scanbuf[0] = 0xff;
-    if (formatyear == 93)
-        scanbuf[1] = 0xd9;
-    else
+    scanbuf[1] = 0xd9;
+    if (sourceimageformat == SIF_94A)
+    {
+        // Search for SFW 94A obfuscated EOI tag
         scanbuf[1] = 0xc9;
+    }
     dataend = forward_scan(bufpos, sfwend, scanbuf, 2);
     if (dataend == NULL) 
         return(-1);
@@ -440,6 +511,21 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
         fprintf(stderr,"\n");
         return(-1);
     }
+
+/*** write DQT table for Overlake Photo Express ***/
+    if (sourceimageformat == SIF_PIC)
+    {
+        sretval = fwrite(overlakephotoDQTtable, sizeof(overlakephotoDQTtable), 1, outfile);
+        if (sretval == 0)
+        {
+            sprintf(mesg, "Error writing file '%s'", filename);
+            fprintf(stderr, "\n");
+            perror(mesg);
+            fprintf(stderr, "\n");
+            return(-1);
+        }
+    }
+
 
 /*** write Huffman table if it is not already there ***/
 
@@ -512,9 +598,8 @@ int fix_marker(USCH *marker)
         return(-1);
     }
 
-    // 93A format does not mangle the formats
-    // unmangle is only required on 94A
-    if (formatyear == 94)
+    // Unmangle is only required on 94A
+    if (sourceimageformat == SIF_94A)
     {
         if (markertbl[marker[1]] == 0)
         {
