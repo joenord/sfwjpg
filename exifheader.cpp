@@ -10,7 +10,12 @@
 
 #include <windows.h>
 
-#define USCH unsigned char
+#include "util.h"
+#include "exifheader.h"
+
+// JPEG files all begin with SOI marker (FFD8)
+// This is followed by a JFIF Header
+
 
 // More than required
 /*
@@ -210,68 +215,7 @@ USCH ExifHeader[] =
 
 
 
-void hexdump(USCH* buf, size_t size)
-{
-    size_t I = 0;
 
-    printf("Hexdump %d (0x%X) bytes.\n", size, size);
-
-    for (I = 0; I < size; I++)
-    {
-        printf("%02X", buf[I]);
-
-        if (I % 0x10 == 0xF)
-        {
-            printf(" (%X)\n", I+1);
-        }
-        else
-        {
-            printf(" ");
-        }
-    }
-
-    if (size % 0x10 != 0)
-    {
-        printf("\n");
-    }
-}
-
-
-char* nexttoken(char* pstring)
-{
-    char* ans = NULL;
-    int found = 0;
-    char ch = '\0';
-
-    if (pstring == NULL)
-    {
-        ans = NULL;
-    }
-    else
-    {
-        ans = pstring;
-        ch = *ans;
-
-        // Skip to next space and treat slash as a space
-        while (ch != ' ' && ch != '/' && ch != '\0')
-        {
-            ans++;
-            ch = *ans;
-        }
-
-        // Skip to next non space and treat slash as a space
-        while ((ch == ' ' || ch == '/')  && ch != '\0')
-        {
-            ans++;
-            ch = *ans;
-        }
-
-        if (ch == '\0')
-            ans = NULL;
-    }
-
-    return ans;
-}
 
 
 // return a pointer to the next location in the Exif header that needs a date set
@@ -298,109 +242,59 @@ char* ofsnextdate(void)
 }
 
 
-//
-// Input parameter is memory pointer to the SFW file in memory
-//
-// The roll number and date of develop are stored in the SFW file at offset 0xE0.
-// The roll number usually has 7 characters, but sometimes has 9.
-//
-//  000000E0  37333138 33373136 - 30302030 30203034  *7318371600 00 04*
-//  000000F0  2F20322F 31393936 - 00000000 3A3B0000  */ 2 / 1996....:; ..*
-//
-// This is an ascii string including a terminating nul.
-// The parameters are mostly space delimited though this is not true after the month.
-//
-int SetExifDates(USCH* psfw, size_t bufsize)
+// Update the Exif header structure in memory with the given date.
+// Note that the input string must be precisly 19 characters (20 bytes) and
+// be in this format: "1970:01:01 00:00:00"
+
+int ExifSetDates(char* pszDate)
 {
     int rc = 0;
     int sizeset = 0;
-
-    char* token = NULL;
-    int month = -1;
-    int day = -1;
-    int year = -1;
-    char szDate[0x14] = "1970:01:01 00:00:00";
-
-    sizeset = sizeof(ExifHeader) - 2;
+    char* dest = NULL;
+    size_t cnt = strlen(pszDate) + 1;
 
     // Ensure the header field for offset to next block 
     // reflects the size of the header
+    sizeset = sizeof(ExifHeader) - 2;
     ExifHeader[2] = sizeset >> 8;
     ExifHeader[3] = sizeset & 0xFF;
 
-    // Easy case
-    // 05294175 00 09/24/1998
-    //
-    // Looks like SFW had a bug fix between 1996 and 1998
-    //
-    // Hard case
-    // 7318371600 00 04/ 2 / 1996
-    // no leading digit ^ and extra spaces
-    //
-    token = (char*)psfw + 0xE0;
-    // printf("%s\n", token);
-
-    // Skip the roll number
-    token = nexttoken(token);
-
-    // Skip the next token which appears to always be 00
-    token = nexttoken(token);
-    month = atoi(token);
-
-    token = nexttoken(token);
-    day = atoi(token);
-
-    token = nexttoken(token);
-    year = atoi(token);
-
-    if (month == 0 || day == 0 || year == 0)
+    if (strlen(pszDate) != 19)
     {
-        perror("Err: SetExifDates Date conversion from SFW file failed");
-        rc = -1;
+        printf("SetExifDates: Date is invalid");
+        return 87;
     }
-    else
+
+    // We have the date - place the date string into the 3 locations in the EXIF data
+    // Rather than hard code the offsets (which could change), search for a token.
+    dest = ofsnextdate();
+    if (dest)
     {
-        char* dest = NULL;
+        memcpy(dest, pszDate, cnt);
+    }
 
-        // SFW data has only the date. Use noon for time.
-        // 
-        // SPACE in the below format string is absolutely required
-        // else dates will not be recognized by Windows
-        sprintf(szDate, "%04d:%02d:%02d 12:00:00", year, month, day);
+    dest = ofsnextdate();
+    if (dest)
+    {
+        memcpy(dest, pszDate, cnt);
+    }
 
-        //printf("%s\n", szDate);
+    dest = ofsnextdate();
+    if (dest)
+    {
+        memcpy(dest, pszDate, cnt);
+    }
 
-        // We have the date - place the date string into the 3 locations in the EXIF data
-        // Rather than hard code the offsets (which could change), search for a token.
-        dest = ofsnextdate();
-        if (dest)
-        {
-            memcpy(dest, szDate, sizeof(szDate));
-        }
-
-        dest = ofsnextdate();
-        if (dest)
-        {
-            memcpy(dest, szDate, sizeof(szDate));
-        }
-
-        dest = ofsnextdate();
-        if (dest)
-        {
-            memcpy(dest, szDate, sizeof(szDate));
-        }
-
-        if (dest == NULL)
-        {
-            rc = -1;
-        }
+    if (dest == NULL)
+    {
+        rc = -1;
     }
 
     return rc;
 }
 
 
-void GetExifHeader(USCH** pExif, size_t* psize)
+void ExifGetHeader(USCH** pExif, size_t* psize)
 {
     // hexdump((USCH *)&ExifHeader, sizeof(ExifHeader));
     *pExif = (USCH*)&ExifHeader;

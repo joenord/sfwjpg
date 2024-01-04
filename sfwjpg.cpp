@@ -5,7 +5,7 @@
 // 2016-Apr Joe Nord     Implement support for 93A format.  Reference:
 //                       http://jonesrh.info/sfw/sfw_sfw93a_details.html
 // 2016-Sep Joe Nord     Implement support for Overlake Photo Express .PIC files
-// 2023-Jan Joe Nord     Create EXIF Header and set file CreateDate to match the 
+// 2023-Jan Joe Nord     Create EXIF Header and set file CreateDate to match the
 //                       date information stored in SFW file (date of develop)
 
 /*
@@ -56,16 +56,10 @@
 #include <sys/stat.h>
 #include <errno.h>
 
-#include <windows.h>    // Directory enumeration - wildcard support
-#include <gdiplus.h>    // Image rotate and unmirror
-#pragma comment( lib, "gdiplus.lib" )
-using namespace Gdiplus;
+#include <windows.h>
 
-#define USCH unsigned char
-
-#include "exifheader.h"
-
-#define NUM_ELEMENTS(array) ( sizeof(array) / sizeof((array)[0]) )
+#include "util.h"
+#include "sfw94a.h"
 
 typedef enum
 {
@@ -76,6 +70,8 @@ typedef enum
 } SOURCEIMAGEFORMAT;
 
 SOURCEIMAGEFORMAT sourceimageformat = SIF_UNKNOWN;
+
+#define USCH unsigned char
 
 #define HUFFSIZE 420
 
@@ -129,11 +125,9 @@ USCH overlakephotoDQTtable[0x86] =
     0x2B, 0x2B
 };
 
-
 int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename);
 USCH *forward_scan(USCH *start, USCH *stop, USCH *goal, int length);
 int fix_marker(USCH *marker);
-int fix_mirroring(char *filename);
 long read_skip_length(USCH *marker);
 
 SOURCEIMAGEFORMAT getformat(USCH *filebuf, size_t len)
@@ -172,6 +166,7 @@ int ReadSfwConvertToJpg (char *infilename)
     USCH *filebuf;
     FILE *infile;
     char *pdot = NULL;
+    char * pszDateFilmDeveloped = NULL;
 
 /*** make input and output filenames *********************************/
 
@@ -244,6 +239,14 @@ int ReadSfwConvertToJpg (char *infilename)
 
     sourceimageformat = getformat(filebuf, filestat.st_size);
 
+    // Read out the date the film was developed (pull from SFW file in memory)
+    if (sourceimageformat == SIF_94A)
+    {
+        // This variable is allocated and we are responsible for delete[]
+        pszDateFilmDeveloped = get_date_from_sfw(filebuf, filebuf + filestat.st_size - 1);
+        //printf("DateDeveloped:%s", pszDateFilmDeveloped);
+    }
+
     retval = sfw_to_jfif(filebuf, filebuf+filestat.st_size-1, outfilename);
 
     free((void *)filebuf);
@@ -252,20 +255,47 @@ int ReadSfwConvertToJpg (char *infilename)
     if (retval != 0)
     {
         fprintf(stderr, "Conversion to %s failed.\n\n",outfilename);
+        if (pszDateFilmDeveloped)
+        {
+            delete[] pszDateFilmDeveloped;
+            pszDateFilmDeveloped = NULL;
+        }
         return(1);
     }
 
     // 20-Jan-2016 For SFW94A unmirror the output and rotate 180 degrees
     if (sourceimageformat == SIF_94A)
     {
-        retval = fix_mirroring(outfilename);
+        retval = fix_mirroring (outfilename);
         if (retval != 0)
         {
             fprintf(stderr, "Un-mirror failed %s failed.\n\n", outfilename);
+            if (pszDateFilmDeveloped)
+            {
+                delete[] pszDateFilmDeveloped;
+                pszDateFilmDeveloped = NULL;
+            }
+            return(1);
+        }
+
+        retval = add_develop_date_to_jpg(outfilename, pszDateFilmDeveloped);
+        if (retval != 0)
+        {
+            fprintf(stderr, "Add date information failed %s failed.\n\n", outfilename);
+            if (pszDateFilmDeveloped)
+            {
+                delete[] pszDateFilmDeveloped;
+                pszDateFilmDeveloped = NULL;
+            }
             return(1);
         }
     }
 
+    if (pszDateFilmDeveloped)
+    {
+        delete[] pszDateFilmDeveloped;
+        pszDateFilmDeveloped = NULL;
+    }
     return(retval);
 }
 
@@ -375,18 +405,12 @@ int main(int argc, char *argv[])
 
 int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 {
-    int  retval, dataflag = 0, huffmanflag = 0, DQTflag = 0;
+    int  retval, dataflag = 0, huffmanflag = 0;
     size_t sretval;
     char mesg[256];
     USCH scanbuf[256];
-    USCH *bufpos;
-    USCH *headerstart, *headerend;
-    USCH *dqtstart, *dqtend;
-    USCH *datastart, *dataend;
-    USCH *jfifheader;
-
+    USCH *bufpos, *headerstart, *headerend, *dataend;
     FILE *outfile;
-    size_t totalBytesWritten = 0;
 
 /*** Initialize lookup table for SFW 94A marker conversions
  *** Just to make stuff hard to understand, the 94A SFW files change the tags
@@ -431,84 +455,33 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 /*** fix identifier and version number           ***/
 /*** place string "JFIF\0\001\0" in proper place ***/
 
-    // Proper JPG file has JFIF header of this format
-    //
-    // OFFSET  VALUE      DESCRIPTION
-    // 00..04  4A46494600 "JFIF" and nul
-    // 05..06  0101       Version major.minor = 01.01
-    // 07..07  01         Units 00 = none, 01 = pixels per inch, 02 = pixels per centimeter
-    // 08..09  0060       Horizonal density = 96 dpi
-    // 0A..0B  0060       Vertical density = 96 dpi
-    // 0C..0D  0000       Horizontal pixel count of the RGB thumbnail that follows. May be 0.
-    // 0E..0F             Vertical pixel count of the RGB thumbnail that follows. May be not present.
-    // 10      3*n        Uncompressed 24 bit RGB raster 
-    //
-    // SFW File has
-    // 00..04  5346573934 "SFW94" and no nul
-    // 05..06  0000       Version major.minor = 00.00
-    // 07..07  00         Units density 00 = none, 01 = pixels per inch, 02 = pixels per centimeter
-    // 08..09  0000       Horizonal density = 0
-    // 0A..0B  0000       Vertical density = 0
-    // 0C..0D  0001       Horizontal pixel count of the RGB thumbnail that follows. May be 0.
-    // 0E..0F  0001       Vertical pixel count of the RGB thumbnail that follows. May be not present.
-    // 10      3*n        Uncompressed 24 bit RGB raster 
-    //
-    // Offset 0 in header is offset 6 in the below
-    // Need to adjust 14 bytes to fix the JFIF Header
-    //
-
-    USCH b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, ba, bb, bc, bd;
-
-    size_t ofsheader = headerstart - sfwstart;
-    jfifheader = headerstart + 6;
-
-    // Some history of what is in the various input files at this location.
-    // PIC files have valid JFIF(nul) but format is 0102 which is strange.
-    //                    // PIC  SFW
-    b0 = jfifheader[0];   // 'J'  'S'
-    b1 = jfifheader[1];   // 'F'  'F'
-    b2 = jfifheader[2];   // 'I'  'W'
-    b3 = jfifheader[3];   // 'F'  '9'
-    b4 = jfifheader[4];   // 00   '4' nul
-    b5 = jfifheader[5];   // 01   00  Version major
-    b6 = jfifheader[6];   // 02   00  Version minor
-    b7 = jfifheader[7];   //      00
-    b8 = jfifheader[8];   //      00
-    b9 = jfifheader[9];   //      01
-    ba = jfifheader[10];  //      00
-    bb = jfifheader[11];  //      01
-    bc = jfifheader[12];  //      00
-    bd = jfifheader[13];  //      00
+    // .PIC format reads as
+    USCH b6, b7, b8, b9, ba, bb, bc;
+    b6 = headerstart[6];   // 'J'
+    b7 = headerstart[7];   // 'F'
+    b8 = headerstart[8];   // 'I'
+    b9 = headerstart[9];   // 'F' JIFF = Identifier
+    ba = headerstart[10];  // 00  Format revision byte 1
+    bb = headerstart[11];  // 01  Format revision byte 2
+    bc = headerstart[12];  // 02  Units for resolution (note different than set 00 below)
+                           //     00 = none, 01 dots per inch, 02 dots per centimeter
 
     // Force identifier and version number for SFW files
     if (sourceimageformat == SIF_93A || sourceimageformat == SIF_94A)
     {
-        jfifheader[0] = 0x4a;     // 'J'
-        jfifheader[1] = 0x46;     // 'F'
-        jfifheader[2] = 0x49;     // 'I'
-        jfifheader[3] = 0x46;     // 'F'
-        jfifheader[4] = 0x00;     // nul
-        jfifheader[5] = 0x01;     // version major 01
-
-        // Jan 14 2023 - Change the JFIF Header to 1.1 format and make valid
-        jfifheader[6] = 0x01;     // version minor 01 (was 00 through year 2022)
-        jfifheader[7] = 0x01;     // Units 00 = none, 01 = pixels per inch, 02 = pixels per centimers
-        jfifheader[8] = 0x00;     // 8..9 Horizontal density (0060) = 96 dpi
-        jfifheader[9] = 0x60;
-        jfifheader[10] = 0x00;    // A..B Vertical density (0060) = 96 dpi
-        jfifheader[11] = 0x60;
-        jfifheader[12] = 0x00;    // C..D Horizontal pixel count of thumbnail (no thumbnail)
-        jfifheader[13] = 0x00;    // No Vertical pixel count at E..F (size restricts)
+        headerstart[6] = 0x4a;
+        headerstart[7] = 0x46;
+        headerstart[8] = 0x49;
+        headerstart[9] = 0x46;
+        headerstart[10] = 0x00;
+        headerstart[11] = 0x01;
+        headerstart[12] = 0x00;
     }
 
 /*** set bufpos to start of next marker ***/
 
     bufpos = headerstart + 2;
     bufpos += read_skip_length(bufpos);
-
-    headerend = bufpos-1;
-
-    dqtstart = bufpos;
 
 /*** fix remaining markers ***/
 
@@ -517,20 +490,14 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
         retval = fix_marker(bufpos);
         if (retval == -1)
             return(-1);
-
         if (retval == (int)0xc4)
             huffmanflag = 1;
-        else if (retval == (int)0xdb)
-            DQTflag = 1;
-
         if (bufpos[1] == 0xda)
             dataflag = 1;
         else
             bufpos += read_skip_length(bufpos);
     }
-    dqtend = bufpos-1;
-
-    datastart = bufpos;
+    headerend = bufpos-1;
 
 /*** scan forward for EOI marker ***/
 
@@ -569,8 +536,8 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
     }
 
 /*** write jfif file header ***/
-    size_t cntheader = (headerend - headerstart) + 1;
-    sretval = fwrite(headerstart, 1, (headerend - headerstart) + 1, outfile);
+
+    sretval = fwrite(headerstart, (headerend-headerstart)+1, 1, outfile);
     if (sretval == 0)
     {
         sprintf(mesg,"Error writing file '%s'",filename);
@@ -578,46 +545,6 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
         perror(mesg);
         fprintf(stderr,"\n");
         return(-1);
-    }
-    totalBytesWritten += sretval;
-    // printf("Header write = %d bytes.\n", sretval);
-
-
-/*** write Exif header to file (date SFW file was developed) ***/
-
-    // Copy the SFW date information into the fixed Exif header
-    SetExifDates(sfwstart, sfwend - sfwstart + 1);
-
-    USCH* pExif = NULL;
-    size_t cntexif = 0;
-    GetExifHeader(&pExif, &cntexif);
-    sretval = fwrite(pExif, 1, cntexif, outfile);
-    if (sretval == 0)
-    {
-        sprintf(mesg, "Error writing Exif header to file '%s'", filename);
-        fprintf(stderr, "\n");
-        perror(mesg);
-        fprintf(stderr, "\n");
-        return(-1);
-    }
-    totalBytesWritten += sretval;
-    // printf("Exif header write = %d bytes.\n", sretval);
-
-/*** write DQT tables for SFW 94A ***/
-    if (DQTflag)
-    {
-        size_t cntdqt = (dqtend - dqtstart) + 1;
-        sretval = fwrite(dqtstart, 1, (dqtend - dqtstart) + 1, outfile);
-        if (sretval == 0)
-        {
-            sprintf(mesg, "Error writing file '%s'", filename);
-            fprintf(stderr, "\n");
-            perror(mesg);
-            fprintf(stderr, "\n");
-            return(-1);
-        }
-        totalBytesWritten += sretval;
-        // printf("DQT write = %d bytes.\n", sretval);
     }
 
 /*** write DQT table for Overlake Photo Express ***/
@@ -632,61 +559,42 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
             fprintf(stderr, "\n");
             return(-1);
         }
-        totalBytesWritten += sretval;
-        // printf("Write DQT Table for Overlake = %d bytes.\n", sretval);
     }
 
 
 /*** write Huffman table if it is not already there ***/
+
     if (!huffmanflag)
     {
-        sretval = fwrite(hufftbl, 1, HUFFSIZE, outfile);
+        sretval = fwrite(hufftbl, HUFFSIZE, 1, outfile);
         if (sretval == 0)
         {
-            sprintf(mesg, "Error writing file '%s'", filename);
-            fprintf(stderr, "\n");
+            sprintf(mesg,"Error writing file '%s'",filename);
+            fprintf(stderr,"\n");
             perror(mesg);
-            fprintf(stderr, "\n");
+            fprintf(stderr,"\n");
             return(-1);
         }
-        totalBytesWritten += sretval;
-        // printf("Write huffman table = %d bytes\n", sretval);
     }
-
-    //// Skip the data - just write end of file marker
-    //sretval = fwrite(dataend - 1, 2, 1, outfile);
-    //if (sretval == 0)
-    //{
-    //    sprintf(mesg, "Error writing file '%s'", filename);
-    //    fprintf(stderr, "\n");
-    //    perror(mesg);
-    //    fprintf(stderr, "\n");
-    //    return(-1);
-    //}
-    //totalBytesWritten += sretval;
-    //printf("Write end of stream = 2 bytes\n");
 
     /*** write rest of jfif file ***/
 
-    sretval = fwrite(datastart, 1, (dataend - datastart) + 1, outfile);
+    sretval = fwrite(headerend+1, dataend-headerend, 1, outfile);
     if (sretval == 0)
     {
-        sprintf(mesg, "Error writing file '%s'", filename);
-        fprintf(stderr, "\n");
+        sprintf(mesg,"Error writing file '%s'",filename);
+        fprintf(stderr,"\n");
         perror(mesg);
-        fprintf(stderr, "\n");
+        fprintf(stderr,"\n");
         return(-1);
     }
-    totalBytesWritten += sretval;
-    // printf("Write rest of file = %d bytes\n", sretval);
-
-    // printf("total bytes written = %d\n", totalBytesWritten);
 
     fclose(outfile);
 
     return(0);
 }
 /***********************************************************************/
+
 
 USCH *forward_scan(USCH *start, USCH *stop, USCH *goal, int length)
 {
@@ -742,78 +650,6 @@ int fix_marker(USCH *marker)
 }
 /***********************************************************************/
 
-// Function straight from MSDN example
-// https://msdn.microsoft.com/en-us/library/windows/desktop/ms533843%28v=vs.85%29.aspx
-int GetEncoderClsid(const WCHAR* format, CLSID* pClsid)
-{
-    UINT  num = 0;          // number of image encoders
-    UINT  size = 0;         // size of the image encoder array in bytes
-
-    ImageCodecInfo* pImageCodecInfo = NULL;
-
-    GetImageEncodersSize(&num, &size);
-    if (size == 0)
-        return -1;  // Failure
-
-    pImageCodecInfo = (ImageCodecInfo*)(malloc(size));
-    if (pImageCodecInfo == NULL)
-        return -1;  // Failure
-
-    GetImageEncoders(num, size, pImageCodecInfo);
-
-    for (UINT j = 0; j < num; ++j)
-    {
-        if (wcscmp(pImageCodecInfo[j].MimeType, format) == 0)
-        {
-            *pClsid = pImageCodecInfo[j].Clsid;
-            free(pImageCodecInfo);
-            return j;  // Success
-        }
-    }
-
-    free(pImageCodecInfo);
-    return -1;  // Failure
-}
-
-/***********************************************************************/
-// Rotate image 180 degrees and unmirror left and right
-// Implementation utilizes Windows APIs
-int fix_mirroring(char *filename)
-{
-    int len = 0;
-    LPWSTR filenamew = NULL;
-
-    // convert to WIDE char required for image functions
-    len = strlen(filename);
-    filenamew = new WCHAR[len + 1];
-    for (int i = 0; i < len; i++)
-    {
-        filenamew[i] = filename[i];
-    }
-    filenamew[len] = '\0';
-
-    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
-    ULONG_PTR gdiplusToken;
-    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, NULL);
-
-    // Load the image
-    Gdiplus::Image* image = Gdiplus::Image::FromFile(filenamew);
-
-    // Rotate image 180 degrees and fix X axis mirroring
-    image->RotateFlip(Rotate180FlipX);
-
-    // Save the image back into the same file it came from
-    CLSID jpgClsid;
-    GetEncoderClsid(L"image/jpeg", &jpgClsid);
-    image->Save(filenamew, &jpgClsid);
-
-    delete image;
-    image = NULL;
-    Gdiplus::GdiplusShutdown(gdiplusToken);
-    delete[] filenamew;
-
-    return (0);
-}
 
 
 /***********************************************************************/
