@@ -7,6 +7,7 @@
 // 2016-Sep Joe Nord     Implement support for Overlake Photo Express .PIC files
 // 2023-Jan Joe Nord     Create EXIF Header and set file CreateDate to match the
 //                       date information stored in SFW file (date of develop)
+// 2024-Jan Joe Nord     Write date information only for 94A format files and recode header write
 
 /*
  * sfwjpg.c
@@ -278,16 +279,16 @@ int ReadSfwConvertToJpg (char *infilename)
             return(1);
         }
 
-        retval = add_develop_date_to_jpg(outfilename, pszDateFilmDeveloped);
-        if (retval != 0)
+        if (pszDateFilmDeveloped)
         {
-            fprintf(stderr, "Add date information failed %s failed.\n\n", outfilename);
-            if (pszDateFilmDeveloped)
+            retval = add_develop_date_to_jpg(outfilename, pszDateFilmDeveloped);
+            if (retval != 0)
             {
+                fprintf(stderr, "Add date information failed %s failed.\n\n", outfilename);
                 delete[] pszDateFilmDeveloped;
                 pszDateFilmDeveloped = NULL;
+                return(retval);
             }
-            return(1);
         }
     }
 

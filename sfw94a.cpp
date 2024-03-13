@@ -180,9 +180,9 @@ char* get_date_from_sfw(USCH* sfwstart, USCH* sfwend)
     char* pszRet = NULL;
     char* pszSFW = NULL;
     char* pszLocal = NULL;
-    int rc = 0;
 
     char* token = NULL;
+    int rollnumber = -1;
     int month = -1;
     int day = -1;
     int year = -1;
@@ -220,29 +220,72 @@ char* get_date_from_sfw(USCH* sfwstart, USCH* sfwend)
     //
     // 7318371600 00 04/ 2 / 1996
     // no leading digit ^ and extra spaces
+    //
+    // ERROR Cases (Mar 13 2024)
+    //    19970_25.sfw has (nul) at this location rather than roll and date information.
+    //    22274_00.sfw has hex: C0 at this location, which is not a valid roll number.
 
+    // Parse all the tokens into local variables, validate valid when tokenized
     token = pszLocal;
     // printf("%s\n", token);
 
-    // Skip the roll number
-    token = nexttoken(token);
-
-    // Skip the next token which appears to always be 00
-    token = nexttoken(token);
-    month = atoi(token);
-
-    token = nexttoken(token);
-    day = atoi(token);
-
-    token = nexttoken(token);
-    year = atoi(token);
-
-    if (month == 0 || day == 0 || year == 0)
+    // First token is roll number
+    if (token)
     {
-        perror("Err: SetExifDates Date conversion from SFW file failed");
-        rc = -1;
+        rollnumber = atoi(token);
+        if (rollnumber <= 0)
+        {
+            token = NULL;
+        }
+        else
+        {
+            token = nexttoken(token);
+        }
     }
-    else
+        
+    // Second token is two digits, normally 00, but have observed 18 in example.sfw date of develop 01-23/1996.
+    if (token)
+    {
+        // Skip this token
+        token = nexttoken(token);
+    }
+
+    // third token is the month
+    if (token)
+    {
+        month = atoi(token);
+        if (month < 1 || month > 12)
+        {
+            token = NULL;
+        }
+        else
+        {
+            token = nexttoken(token);
+        }
+    }
+
+    // day
+    if (token)
+    {
+        day = atoi(token);
+        if (day < 1 || day > 31)
+        {
+            token = NULL;
+        }
+        else
+        {
+            token = nexttoken(token);
+        }
+    }
+
+    // year
+    if (token)
+    {
+        year = atoi(token);
+    }
+
+    // Are all of the fields valid?
+    if (year >= 1900 && year <= 9999)
     {
         // SFW data has only the date. Use noon for time.
         // 
@@ -254,6 +297,11 @@ char* get_date_from_sfw(USCH* sfwstart, USCH* sfwend)
         pszRet = new char[cnt];
 
         sprintf_s(pszRet, cnt, "%04d:%02d:%02d 12:00:00", year, month, day);
+    }
+    else
+    {
+        // perror("Err: get_date_from_sfw invalid data for date of develop");
+        pszRet = NULL;
     }
 
     delete[] pszLocal;
@@ -412,5 +460,4 @@ int add_develop_date_to_jpg(char* filename, char* exifdate)
     }
 
     return 0;
-
 }
