@@ -388,6 +388,8 @@ int add_develop_date_to_jpg(char* filename, char* exifdate)
     // Write an appropriate EXIF header to the start of the file, then copy all the other JFIF 
     // blocks into the output file.
 
+    // printf("file: %s, exifdate: %s\n", filename, exifdate);
+
     // Update the Exif data structure with date provided
     rc = ExifSetDates(exifdate);
     if (rc != 0)
