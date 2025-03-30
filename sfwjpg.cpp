@@ -66,11 +66,10 @@ typedef enum
 {
     SIF_UNKNOWN,
     SIF_93A,         // Seattle Filmworks original format
-    SIF_94A,         // Seattle Filmworks tag obfuscated format
+    SIF_94A,         // Seattle Filmworks tag obfuscated format SFW
+    SIF_95B,         // Seattle Filmworks PhotoWorks format PWP
     SIF_PIC          // Overlake Photo Express PIC
 } SOURCEIMAGEFORMAT;
-
-SOURCEIMAGEFORMAT sourceimageformat = SIF_UNKNOWN;
 
 #define USCH unsigned char
 
@@ -126,9 +125,9 @@ USCH overlakephotoDQTtable[0x86] =
     0x2B, 0x2B
 };
 
-int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename);
+int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, SOURCEIMAGEFORMAT sourceimageformat, char *outfilename);
 USCH *forward_scan(USCH *start, USCH *stop, USCH *goal, int length);
-int fix_marker(USCH *marker);
+int fix_marker(USCH* marker, SOURCEIMAGEFORMAT sourceimageformat);
 long read_skip_length(USCH *marker);
 
 SOURCEIMAGEFORMAT getformat(USCH *filebuf, size_t len)
@@ -146,6 +145,10 @@ SOURCEIMAGEFORMAT getformat(USCH *filebuf, size_t len)
         {
             ret = SIF_94A;
         }
+        else if (strncmp(pbuff, "SFW95", 5) == 0)
+        {
+            ret = SIF_95B;
+        }
         else if (strncmp(pbuff, "BM", 2) == 0)
         {
             // First 16 bytes of all sample Overlake Photo Files are same
@@ -157,21 +160,18 @@ SOURCEIMAGEFORMAT getformat(USCH *filebuf, size_t len)
     return ret;
 }
 
-int ReadSfwConvertToJpg (char *infilename)
-{
-    int retval = 0;
-    size_t sretval, namelen;
-    char mesg[256];
-    struct stat filestat;
-    char outfilename[256];
-    USCH *filebuf;
-    FILE *infile;
-    char *pdot = NULL;
-    char * pszDateFilmDeveloped = NULL;
 
-/*** make input and output filenames *********************************/
+// Returned filename string is allocated by function
+// Caller must release the memory using delete[]
+char *GetOutputFileName(char* infilename, size_t cnt)
+{
+    char* outfilename = NULL;
+    char* pdot = NULL;
+    size_t namelen = 0;
 
     namelen = strlen(infilename);
+    outfilename = new char[namelen + 1 + 4 + 4];  // nul, -nnn, .ext
+
     strcpy(outfilename, infilename);
 
     pdot = strrchr(outfilename, '.');
@@ -181,8 +181,12 @@ int ReadSfwConvertToJpg (char *infilename)
         pdot = outfilename + namelen;
     }
 
-    if (_stricmp(pdot, ".sfw") == 0 ||  // 94A files have sfw extention on input
-        _stricmp(pdot, ".pic") == 0)    // Overlake Photo Express
+    if (_stricmp(pdot, ".pwp") == 0)
+    {
+        sprintf(pdot, "-%02d.jpg", cnt);
+    }
+    else if (_stricmp(pdot, ".sfw") == 0 || // 94A files have sfw extention on input
+        _stricmp(pdot, ".pic") == 0)        // Overlake Photo Express
     {
         // Output file same name as input file, with jpg extension
         strcpy(pdot, ".jpg");
@@ -193,101 +197,50 @@ int ReadSfwConvertToJpg (char *infilename)
         //    rollnumber.#nn    where nn is the frame number
         // Since rollnumber is same for all shots, and only extension changes,
         // keep the #nn and append jpg extension
-        strcat (outfilename, ".jpg");
+        strcat(outfilename, ".jpg");
     }
+    return outfilename;
+}
 
-/*** read entire source file ***********************************************/
-
-    retval = _stat(infilename,(struct _stat *)&filestat);
-    if (retval == -1)
-    {
-        sprintf(mesg,"Error getting status for file '%s'",infilename);
-        fprintf(stderr,"\n");
-        perror(mesg);
-        fprintf(stderr,"\n");
-        return(1);
-    }
-
-    filebuf = (USCH *) malloc( (size_t) filestat.st_size);
-    if (filebuf == NULL)
-    {
-        fprintf(stderr,"\n");
-        perror("Error allocating memory for filebuf");
-        fprintf(stderr,"\n");
-        return(1);
-    }
-
-    infile = fopen(infilename,"rb");
-    if (infile == NULL)
-    {
-        sprintf(mesg,"Error opening file '%s'",infilename);
-        fprintf(stderr,"\n");
-        perror(mesg);
-        fprintf(stderr,"\n");
-        return(1);
-    }
-
-    sretval = fread(filebuf, filestat.st_size, 1, infile);
-    if (sretval == 0)
-    {
-        sprintf(mesg,"Error reading file '%s'",infilename);
-        fprintf(stderr,"\n");
-        perror(mesg);
-        fprintf(stderr,"\n");
-        return(1);
-    }
-    fclose(infile);
-
-    sourceimageformat = getformat(filebuf, filestat.st_size);
+// Produce ONE output file based upon the given "file" input.
+// For SFW and normal files, there is a 1:1 relation to file on disk to disk images.
+// PWP files have multiple image "files" inside the PWP file (like ZIP).
+// This function produces ONE output based upon the input and position data in the file.
+int ConvertWorker (USCH* sfwstart, USCH* sfwend, SOURCEIMAGEFORMAT sif, char* outfilename)
+{
+    int retval = 0;
+    char* pszDateFilmDeveloped = NULL;
 
     // Read out the date the film was developed (pull from SFW file in memory)
-    if (sourceimageformat == SIF_94A)
+    if (sif == SIF_94A)
     {
         // This variable is allocated and we are responsible for delete[]
-        pszDateFilmDeveloped = get_date_from_sfw(filebuf, filebuf + filestat.st_size - 1);
+        pszDateFilmDeveloped = get_date_from_sfw(sfwstart, sfwend);
         //printf("DateDeveloped:%s", pszDateFilmDeveloped);
     }
 
-    retval = sfw_to_jfif(filebuf, filebuf+filestat.st_size-1, outfilename);
+    retval = sfw_to_jfif(sfwstart, sfwend, sif, outfilename);
 
-    free((void *)filebuf);
-    filebuf = NULL;
-
-    if (retval != 0)
+    if (retval == 0)
     {
-        fprintf(stderr, "Conversion to %s failed.\n\n",outfilename);
-        if (pszDateFilmDeveloped)
+        // 20-Jan-2016 For SFW94A unmirror the output and rotate 180 degrees
+        if (sif == SIF_94A)
         {
-            delete[] pszDateFilmDeveloped;
-            pszDateFilmDeveloped = NULL;
-        }
-        return(1);
-    }
-
-    // 20-Jan-2016 For SFW94A unmirror the output and rotate 180 degrees
-    if (sourceimageformat == SIF_94A)
-    {
-        retval = fix_mirroring (outfilename);
-        if (retval != 0)
-        {
-            fprintf(stderr, "Un-mirror failed %s failed.\n\n", outfilename);
-            if (pszDateFilmDeveloped)
-            {
-                delete[] pszDateFilmDeveloped;
-                pszDateFilmDeveloped = NULL;
-            }
-            return(1);
-        }
-
-        if (pszDateFilmDeveloped)
-        {
-            retval = add_develop_date_to_jpg(outfilename, pszDateFilmDeveloped);
+            retval = fix_mirroring(outfilename);
             if (retval != 0)
             {
-                fprintf(stderr, "Add date information failed %s failed.\n\n", outfilename);
-                delete[] pszDateFilmDeveloped;
-                pszDateFilmDeveloped = NULL;
-                return(retval);
+                fprintf(stderr, "Un-mirror failed: %s.\n\n", outfilename);
+            }
+            else
+            {
+                if (pszDateFilmDeveloped)
+                {
+                    retval = add_develop_date_to_jpg(outfilename, pszDateFilmDeveloped);
+                    if (retval != 0)
+                    {
+                        fprintf(stderr, "Add date information failed: %s.\n\n", outfilename);
+                    }
+                }
             }
         }
     }
@@ -297,6 +250,125 @@ int ReadSfwConvertToJpg (char *infilename)
         delete[] pszDateFilmDeveloped;
         pszDateFilmDeveloped = NULL;
     }
+
+    return (retval);
+}
+
+
+int ReadSfwConvertToJpg (char *infilename)
+{
+    int retval = 0;
+    size_t sretval;
+    char mesg[256];
+    struct stat filestat;
+    char *outfilename = NULL;
+    USCH *filebuf;
+    FILE *infile;
+    SOURCEIMAGEFORMAT sourceimageformat = SIF_UNKNOWN;
+
+    /*** read entire source file ***********************************************/
+
+    retval = _stat(infilename, (struct _stat*)&filestat);
+    if (retval == -1)
+    {
+        sprintf(mesg, "Error getting status for file '%s'", infilename);
+        fprintf(stderr, "\n");
+        perror(mesg);
+        fprintf(stderr, "\n");
+        return(1);
+    }
+
+    filebuf = (USCH*)malloc((size_t)filestat.st_size);
+    if (filebuf == NULL)
+    {
+        fprintf(stderr, "\n");
+        perror("Error allocating memory for filebuf");
+        fprintf(stderr, "\n");
+        return(1);
+    }
+
+    infile = fopen(infilename, "rb");
+    if (infile == NULL)
+    {
+        sprintf(mesg, "Error opening file '%s'", infilename);
+        fprintf(stderr, "\n");
+        perror(mesg);
+        fprintf(stderr, "\n");
+        return(1);
+    }
+
+    sretval = fread(filebuf, filestat.st_size, 1, infile);
+    if (sretval == 0)
+    {
+        sprintf(mesg, "Error reading file '%s'", infilename);
+        fprintf(stderr, "\n");
+        perror(mesg);
+        fprintf(stderr, "\n");
+        return(1);
+    }
+    fclose(infile);
+
+    // Determine the input file format (from the input file on disk)
+    sourceimageformat = getformat(filebuf, filestat.st_size);
+
+    if (sourceimageformat == SIF_95B)
+    {
+        // PhotoWorks files (.PWP) have multiple SFW94A images per file.
+        // Loop through all of the images.
+        USCH scanbuf[6] = { 0x53, 0x46, 0x57, 0x39, 0x34, 0x41 };   // SFW94A
+        SOURCEIMAGEFORMAT sif = SIF_UNKNOWN;
+        USCH* pCur = filebuf;
+        USCH* pNext = NULL;
+        size_t BufSize = filestat.st_size;
+        size_t CurSize = 0;
+        size_t cnt = 0;
+
+        // Find the first SFW94A in the buffer
+        pCur = forward_scan(filebuf, filebuf + BufSize - 1, scanbuf, NUM_ELEMENTS(scanbuf));
+
+        while (pCur)
+        {
+            cnt++;
+
+            pNext = forward_scan(pCur + 1, pCur + BufSize - 2, scanbuf, NUM_ELEMENTS(scanbuf));
+            if (pNext)
+            {
+                CurSize = pNext - pCur;
+            }
+            else
+            {
+                CurSize = BufSize;
+            }
+                
+            sif = getformat(pCur, BufSize);
+            outfilename = GetOutputFileName(infilename, cnt);
+            retval = ConvertWorker(pCur, pCur + BufSize - 1, sif, outfilename);
+
+            delete[] outfilename;
+            outfilename = NULL;
+
+            BufSize -= CurSize;
+            pCur = pNext;
+        }
+    }
+    else
+    {
+        // One image per file - process the single image
+        outfilename = GetOutputFileName(infilename, 1);
+        retval = ConvertWorker (filebuf, filebuf + filestat.st_size - 1, sourceimageformat, outfilename);
+
+        delete[] outfilename;
+        outfilename = NULL;
+    }
+
+    free((void *)filebuf);
+    filebuf = NULL;
+
+    if (retval != 0)
+    {
+        fprintf(stderr, "Conversion to %s failed.\n\n",outfilename);
+    }
+
     return(retval);
 }
 
@@ -404,7 +476,7 @@ int main(int argc, char *argv[])
 //
 /***********************************************************************/
 
-int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
+int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, SOURCEIMAGEFORMAT sourceimageformat, char *outfilename)
 {
     int  retval, dataflag = 0, huffmanflag = 0;
     size_t sretval;
@@ -448,9 +520,9 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 
 /*** fix SOI and APP0 tags ***/
 
-    retval = fix_marker(headerstart);
+    retval = fix_marker(headerstart, sourceimageformat);
     if (retval == -1) return(-1);
-    retval = fix_marker(headerstart+2);
+    retval = fix_marker(headerstart+2, sourceimageformat);
     if (retval == -1) return(-1);
 
 /*** fix identifier and version number           ***/
@@ -488,7 +560,7 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 
     while (!dataflag)
     {
-        retval = fix_marker(bufpos);
+        retval = fix_marker(bufpos, sourceimageformat);
         if (retval == -1)
             return(-1);
         if (retval == (int)0xc4)
@@ -515,21 +587,21 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
 
 /*** fix EOI marker ***/
 
-    retval = fix_marker(dataend);
+    retval = fix_marker(dataend, sourceimageformat);
     if (retval == -1) return(-1);
     dataend ++;
 
 /*** open output file ***/
 
-    if (filename[0] == '\0')
+    if (outfilename[0] == '\0')
         outfile = stdout;
     else
-        outfile = fopen(filename,"wb");
+        outfile = fopen(outfilename,"wb");
 
     if (outfile == NULL)
     {
-        if (filename[0] == '\0') strcpy(filename, "standard output");
-        sprintf(mesg,"Error opening file '%s'",filename);
+        if (outfilename[0] == '\0') strcpy(outfilename, "standard output");
+        sprintf(mesg,"Error opening file '%s'", outfilename);
         fprintf(stderr,"\n");
         perror(mesg);
         fprintf(stderr,"\n");
@@ -541,7 +613,7 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
     sretval = fwrite(headerstart, (headerend-headerstart)+1, 1, outfile);
     if (sretval == 0)
     {
-        sprintf(mesg,"Error writing file '%s'",filename);
+        sprintf(mesg,"Error writing file '%s'", outfilename);
         fprintf(stderr,"\n");
         perror(mesg);
         fprintf(stderr,"\n");
@@ -554,7 +626,7 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
         sretval = fwrite(overlakephotoDQTtable, sizeof(overlakephotoDQTtable), 1, outfile);
         if (sretval == 0)
         {
-            sprintf(mesg, "Error writing file '%s'", filename);
+            sprintf(mesg, "Error writing file '%s'", outfilename);
             fprintf(stderr, "\n");
             perror(mesg);
             fprintf(stderr, "\n");
@@ -570,7 +642,7 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
         sretval = fwrite(hufftbl, HUFFSIZE, 1, outfile);
         if (sretval == 0)
         {
-            sprintf(mesg,"Error writing file '%s'",filename);
+            sprintf(mesg,"Error writing file '%s'", outfilename);
             fprintf(stderr,"\n");
             perror(mesg);
             fprintf(stderr,"\n");
@@ -583,7 +655,7 @@ int sfw_to_jfif(USCH *sfwstart, USCH *sfwend, char *filename)
     sretval = fwrite(headerend+1, dataend-headerend, 1, outfile);
     if (sretval == 0)
     {
-        sprintf(mesg,"Error writing file '%s'",filename);
+        sprintf(mesg,"Error writing file '%s'", outfilename);
         fprintf(stderr,"\n");
         perror(mesg);
         fprintf(stderr,"\n");
@@ -621,12 +693,12 @@ USCH *forward_scan(USCH *start, USCH *stop, USCH *goal, int length)
             }
         }
     }
-    fprintf(stderr,"forward_scan() failed.\n\n");
+    //fprintf(stderr,"forward_scan() failed.\n\n");
     return(NULL);
 }
 /***********************************************************************/
 
-int fix_marker(USCH *marker)
+int fix_marker(USCH *marker, SOURCEIMAGEFORMAT sourceimageformat)
 {
     if (marker[0] != 0xFF)
     {
